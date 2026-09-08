@@ -17,28 +17,6 @@
  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// NOTE: This file has been extended (compared to upstream wmbusmeters) to
-// also provide a hand-written "izarv2" driver, using the same old-style
-// MeterCommonImplementation framework as the original "izar" driver.
-//
-// Upstream wmbusmeters has since migrated "izarv2" to its new declarative
-// driver engine (drivers/src/izarv2.xmq + generated_database.cc), which is
-// not present in this vendored, older codebase. This hand port replicates
-// the exact same field semantics and output format as upstream izarv2,
-// based on drivers/src/izarv2.xmq, while reusing the already proven PRIOS
-// decoding logic (decodePrios/LFSR + alarm bit extraction) from "izar".
-//
-// Differences vs "izar" (field names / output shape only, decoding is identical):
-//   izar                        -> izarv2
-//   total_m3                    -> total_m3            (same)
-//   last_month_total_m3         -> target_m3
-//   last_month_measure_date     -> target_date
-//   remaining_battery_life_y    -> battery_y
-//   manufacture_year            -> manufacture_y
-//   current_alarms/previous_alarms (comma separated, lowercase)
-//                                -> status (single space separated, UPPERCASE,
-//                                   defaults to "OK" when no alarm is set)
-
 #include"meters_common_implementation.h"
 #include"manufacturer_specificities.h"
 
@@ -63,7 +41,7 @@ namespace
 
     struct Driver : public virtual MeterCommonImplementation
     {
-        Driver(MeterInfo &mi, DriverInfo &di, bool is_v2);
+        Driver(MeterInfo &mi, DriverInfo &di);
 
         void processContent(Telegram *t);
 
@@ -71,12 +49,10 @@ namespace
 
         std::string currentAlarmsText(IzarAlarms &alarms);
         std::string previousAlarmsText(IzarAlarms &alarms);
-        std::string statusTextV2(IzarAlarms &alarms);
 
         std::vector<uchar> decodePrios(const std::vector<uchar> &origin, const std::vector<uchar> &payload, uint32_t key);
 
         std::vector<uint32_t> keys;
-        bool v2;
     };
 
     static bool ok = registerDriver([](DriverInfo&di)
@@ -100,29 +76,10 @@ namespace
         di.addDetection(MANUFACTURER_HYD,  0x07,  0x86);
         di.usesProcessContent();
 
-        di.setConstructor([](MeterInfo& mi, DriverInfo& di){ return std::shared_ptr<Meter>(new Driver(mi, di, false)); });
+        di.setConstructor([](MeterInfo& mi, DriverInfo& di){ return std::shared_ptr<Meter>(new Driver(mi, di)); });
     });
 
-    // Hand-written port of upstream's newer "izarv2" driver (see file header comment above).
-    static bool ok_v2 = registerDriver([](DriverInfo&di)
-    {
-        di.setName("izarv2");
-        di.setDefaultFields("name,id,status,total_m3,target_m3,timestamp");
-        di.setMeterType(MeterType::WaterMeter);
-        di.addLinkMode(LinkMode::T1);
-        di.addDetection(MANUFACTURER_HYD,  0x07,  0x85);
-        di.addDetection(MANUFACTURER_SAP,  0x15,    -1);
-        di.addDetection(MANUFACTURER_SAP,  0x04,    -1);
-        di.addDetection(MANUFACTURER_SAP,  0x07,  0x00);
-        di.addDetection(MANUFACTURER_DME,  0x07,  0x78);
-        di.addDetection(MANUFACTURER_DME,  0x06,  0x78);
-        di.addDetection(MANUFACTURER_HYD,  0x07,  0x86);
-        di.usesProcessContent();
-
-        di.setConstructor([](MeterInfo& mi, DriverInfo& di){ return std::shared_ptr<Meter>(new Driver(mi, di, true)); });
-    });
-
-    Driver::Driver(MeterInfo &mi, DriverInfo &di, bool is_v2) : MeterCommonImplementation(mi, di), v2(is_v2)
+    Driver::Driver(MeterInfo &mi, DriverInfo &di) : MeterCommonImplementation(mi, di)
     {
         initializeDiehlDefaultKeySupport(meterKeys()->confidentiality_key, keys);
 
@@ -139,66 +96,36 @@ namespace
                         DEFAULT_PRINT_PROPERTIES,
                         "The total water consumption recorded by this meter.");
 
-        if (!v2)
-        {
-            addNumericField("last_month_total",
-                            Quantity::Volume,
-                            DEFAULT_PRINT_PROPERTIES,
-                            "The total water consumption recorded by this meter around end of last month.");
+        addNumericField("last_month_total",
+                        Quantity::Volume,
+                        DEFAULT_PRINT_PROPERTIES,
+                        "The total water consumption recorded by this meter around end of last month.");
 
-            addStringField("last_month_measure_date",
-                           "The date when the meter recorded the most recent billing value.",
-                           DEFAULT_PRINT_PROPERTIES);
+        addStringField("last_month_measure_date",
+                       "The date when the meter recorded the most recent billing value.",
+                       DEFAULT_PRINT_PROPERTIES);
 
-            addNumericField("remaining_battery_life",
-                            Quantity::Time,
-                            DEFAULT_PRINT_PROPERTIES,
-                            "How many more years the battery is expected to last",
-                            Unit::Year);
+        addNumericField("remaining_battery_life",
+                        Quantity::Time,
+                        DEFAULT_PRINT_PROPERTIES,
+                        "How many more years the battery is expected to last",
+                        Unit::Year);
+        addStringField("current_alarms",
+                       "Alarms currently reported by the meter.",
+                       DEFAULT_PRINT_PROPERTIES);
 
-            addStringField("current_alarms",
-                           "Alarms currently reported by the meter.",
-                           DEFAULT_PRINT_PROPERTIES);
-
-            addStringField("previous_alarms",
-                           "Alarms previously reported by the meter.",
-                           DEFAULT_PRINT_PROPERTIES);
-
-            addStringField("manufacture_year",
-                           "The year during which the meter was manufactured.",
-                           DEFAULT_PRINT_PROPERTIES);
-        }
-        else
-        {
-            // Same values as above, but named/shaped like upstream's izarv2 driver.
-            addNumericField("target",
-                            Quantity::Volume,
-                            DEFAULT_PRINT_PROPERTIES,
-                            "The total water consumption recorded at the end of last month.");
-
-            addStringField("target_date",
-                           "The date when the meter recorded the most recent billing value.",
-                           DEFAULT_PRINT_PROPERTIES);
-
-            addNumericField("battery",
-                            Quantity::Time,
-                            DEFAULT_PRINT_PROPERTIES,
-                            "How many more years the battery is expected to last",
-                            Unit::Year);
-
-            addStringField("status",
-                           "Current and previous alarms reported by the meter (space separated, OK if none).",
-                           DEFAULT_PRINT_PROPERTIES);
-
-            addStringField("manufacture_y",
-                           "The year during which the meter was manufactured.",
-                           DEFAULT_PRINT_PROPERTIES);
-        }
+        addStringField("previous_alarms",
+                       "Alarms previously reported by the meter.",
+                       DEFAULT_PRINT_PROPERTIES);
 
         addNumericField("transmit_period", Quantity::Time,
                         DEFAULT_PRINT_PROPERTIES,
                         "The period at which the meter transmits its data.",
                         Unit::Second);
+
+        addStringField("manufacture_year",
+                       "The year during which the meter was manufactured.",
+                       DEFAULT_PRINT_PROPERTIES);
     }
 
     std::string Driver::currentAlarmsText(IzarAlarms &alarms)
@@ -257,33 +184,6 @@ namespace
         return "no_alarm";
     }
 
-    // Mirrors upstream izarv2.xmq's "status" lookup: a single, space separated,
-    // UPPERCASE list of currently-set alarm flags (in the same declaration order
-    // as the upstream ALARMS lookup table), defaulting to "OK" when none are set.
-    // Note: izarv2 has no equivalent of izar's "general_alarm" flag, so it is
-    // intentionally not included here.
-    std::string Driver::statusTextV2(IzarAlarms &alarms)
-    {
-        std::string s;
-        if (alarms.leakage_currently)             s.append("LEAKAGE ");
-        if (alarms.meter_blocked)                 s.append("METER_BLOCKED ");
-        if (alarms.back_flow)                     s.append("BACK_FLOW ");
-        if (alarms.underflow)                     s.append("UNDERFLOW ");
-        if (alarms.overflow)                      s.append("OVERFLOW ");
-        if (alarms.submarine)                     s.append("SUBMARINE ");
-        if (alarms.sensor_fraud_currently)        s.append("SENSOR_FRAUD ");
-        if (alarms.mechanical_fraud_currently)    s.append("MECHANICAL_FRAUD ");
-        if (alarms.leakage_previously)            s.append("PREV_LEAKAGE ");
-        if (alarms.sensor_fraud_previously)       s.append("PREV_SENSOR_FRAUD ");
-        if (alarms.mechanical_fraud_previously)   s.append("PREV_MECHANICAL_FRAUD ");
-
-        if (s.length() > 0) {
-            s.pop_back(); // remove trailing space
-            return s;
-        }
-        return "OK";
-    }
-
     void Driver::processContent(Telegram *t)
     {
         std::vector<uchar> frame;
@@ -315,11 +215,7 @@ namespace
             // get the manufacture year
             uint8_t yy = atoi(digits.substr(0, 2).c_str());
             int manufacture_year = yy > 70 ? (1900 + yy) : (2000 + yy); // Maybe to adjust in 2070, if this code stills lives :D
-            if (!v2) {
-                setStringValue("manufacture_year", tostrprintf("%d", manufacture_year), NULL);
-            } else {
-                setStringValue("manufacture_y", tostrprintf("%d", manufacture_year), NULL);
-            }
+            setStringValue("manufacture_year", tostrprintf("%d", manufacture_year), NULL);
 
             // get the serial number
             uint32_t serial_number = atoi(digits.substr(2, digits.size()).c_str());
@@ -336,11 +232,7 @@ namespace
 
         // get the remaining battery life (in year) and transmission period (in seconds)
         double remaining_battery_life = (frame[12] & 0x1F) / 2.0;
-        if (!v2) {
-            setNumericValue("remaining_battery_life", Unit::Year, remaining_battery_life);
-        } else {
-            setNumericValue("battery", Unit::Year, remaining_battery_life);
-        }
+        setNumericValue("remaining_battery_life", Unit::Year, remaining_battery_life);
 
         int transmit_period_s = 1 << ((frame[11] & 0x0F) + 2);
         setNumericValue("transmit_period", Unit::Second, transmit_period_s);
@@ -350,13 +242,9 @@ namespace
 
         if (decoded_content.size() > 8) {
             double last_month_total_water_consumption_l_ = uint32FromBytes(decoded_content, 5, true);
-            if (!v2) {
-                setNumericValue("last_month_total", Unit::L, last_month_total_water_consumption_l_);
-            } else {
-                setNumericValue("target", Unit::L, last_month_total_water_consumption_l_);
-            }
+            setNumericValue("last_month_total", Unit::L, last_month_total_water_consumption_l_);
         }
-
+        
         // get the date when the second measurement was taken
         if (decoded_content.size() > 10) {
             uint16_t h0_year = ((decoded_content[10] & 0xF0) >> 1) + ((decoded_content[9] & 0xE0) >> 5);
@@ -368,12 +256,7 @@ namespace
             uint8_t h0_month = decoded_content[10] & 0xF;
             uint8_t h0_day = decoded_content[9] & 0x1F;
 
-            std::string date_str = tostrprintf("%d-%02d-%02d", h0_year, h0_month%99, h0_day%99);
-            if (!v2) {
-                setStringValue("last_month_measure_date", date_str, NULL);
-            } else {
-                setStringValue("target_date", date_str, NULL);
-            }
+            setStringValue("last_month_measure_date", tostrprintf("%d-%02d-%02d", h0_year, h0_month%99, h0_day%99), NULL);
         }
 
         // read the alarms:
@@ -392,12 +275,8 @@ namespace
         alarms.mechanical_fraud_currently = frame[13] >> 1 & 0x1;
         alarms.mechanical_fraud_previously = frame[13] & 0x1;
 
-        if (!v2) {
-            setStringValue("current_alarms", currentAlarmsText(alarms));
-            setStringValue("previous_alarms", previousAlarmsText(alarms));
-        } else {
-            setStringValue("status", statusTextV2(alarms));
-        }
+        setStringValue("current_alarms", currentAlarmsText(alarms));
+        setStringValue("previous_alarms", previousAlarmsText(alarms));
     }
 
     std::vector<uchar> Driver::decodePrios(const std::vector<uchar> &origin, const std::vector<uchar> &frame, uint32_t key)
@@ -438,13 +317,5 @@ namespace
 // {"_":"telegram","media":"water","meter":"izar","name":"IzarWater6","id":"48500375","total_m3":521.602,"last_month_total_m3":519.147,"last_month_measure_date":"2021-11-15","remaining_battery_life_y":9,"current_alarms":"no_alarm","previous_alarms":"leakage","transmit_period_s":8,"timestamp":"1111-11-11T11:11:11Z"}
 // |IzarWater6;48500375;null;null;521.602;519.147;2021-11-15;9;no_alarm;leakage;8;null;1111-11-11 11:11.11
 
-// Test: IzarWater izarv2 21242472 NOKEY
-// telegram=|1944304C72242421D401A2_013D4013DD8B46A4999C1293E582CC|
-// {"_":"telegram","media":"water","driver":"izarv2","name":"IzarWater","id":"21242472","prefix":"C19UA","serial_number":"145842","manufacture_y":"2019","total_m3":3.488,"target_m3":3.486,"target_date":"2019-09-30","battery_y":14.5,"transmit_period_s":8,"status":"METER_BLOCKED UNDERFLOW","timestamp":"1111-11-11T11:11:11Z"}
-
-// Test: IzarWater6 izarv2 48500375 NOKEY
-// telegram=|19442423860775035048A251520015BEB6B2E1ED623A18FC74A5|
-// {"_":"telegram","media":"water","driver":"izarv2","name":"IzarWater6","id":"48500375","total_m3":521.602,"target_m3":519.147,"target_date":"2021-11-15","battery_y":9,"transmit_period_s":8,"status":"PREV_LEAKAGE","timestamp":"1111-11-11T11:11:11Z"}
 
 KEEP_DRIVER(izar);
-KEEP_DRIVER(izarv2);
